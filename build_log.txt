@@ -1,0 +1,8 @@
+Ordner: C:/Users/fibu3/ClaudeCode/IGE-RCH-CZ-Liste
+Lade Kreditoren.xlsx ...
+  [3216.xlsx] KEIN TREFFER: Ref=712601024 Kred=70022
+3216.xlsx: 63 Zeilen verarbeitet
+  [3226.xlsx] FUZZY (FV1/MAG-WDT/05/26 -> FV 1/MAG-WDT/05/26)
+3226.xlsx: 11 Zeilen verarbeitet
+
+Gespeichert: C:/Users/fibu3/ClaudeCode/IGE-RCH-CZ-Liste\Reverse Charge and IGE.xlsx
