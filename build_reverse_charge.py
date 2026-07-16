@@ -22,10 +22,13 @@ _FILL_HEADER  = PatternFill("solid", fgColor="1F4E79")   # dunkelblau
 _FILL_ZEBRA_E = PatternFill("solid", fgColor="DCE6F1")   # hellblau (gerade Zeilen)
 _FILL_ZEBRA_O = PatternFill("solid", fgColor="FFFFFF")   # weiss (ungerade Zeilen)
 _FILL_WARN    = PatternFill("solid", fgColor="FFC7CE")   # rot – Service Date frueherer Monat
+_FILL_CALC    = PatternFill("solid", fgColor="FFF2CC")   # hellgold – errechnete CZK-Spalten
+_BORDER_CALC_COLOR = "BF8F00"                            # dunkelgold – Rahmen um die CZK-Spalten
 _FONT_HEADER  = Font(bold=True, color="FFFFFF", name="Calibri", size=10)
 _FONT_BODY    = Font(name="Calibri", size=10)
 _NUM_FORMAT   = '#,##0.00'
-_NUM_COLS     = {"Fremdwährung", "Fremdwaehrung", "Betrag"}  # Spalten als Zahl formatieren
+_NUM_COLS     = {"Fremdwährung", "Fremdwaehrung", "Betrag", "Betrag CZK"}  # Spalten als Zahl formatieren
+_CALC_COLS    = {"Betrag CZK", "Währung CZK"}  # optisch abgesetzte, errechnete Spalten
 
 
 def _apply_formatting(ws, df):
@@ -36,16 +39,27 @@ def _apply_formatting(ws, df):
     sd_col    = col_idx.get("Service Date")
     datum_col = col_idx.get("Datum")
     num_cols  = [col_idx[h] for h in headers if h in _NUM_COLS and h in col_idx]
+    calc_cols = [col_idx[h] for h in headers if h in _CALC_COLS and h in col_idx]
+    calc_min  = min(calc_cols) if calc_cols else None
+    calc_max  = max(calc_cols) if calc_cols else None
 
-    thin = Side(style="thin", color="AAAAAA")
-    border = Border(left=thin, right=thin, top=thin, bottom=thin)
+    thin  = Side(style="thin", color="AAAAAA")
+    thick = Side(style="medium", color=_BORDER_CALC_COLOR)
+
+    def cell_border(col, row_idx):
+        """Normaler duenner Rahmen, an den Aussenkanten des CZK-Blocks dicker/goldfarben."""
+        left   = thick if col == calc_min else thin
+        right  = thick if col == calc_max else thin
+        top    = thick if (col in calc_cols and row_idx == 1) else thin
+        bottom = thick if (col in calc_cols and row_idx == ws.max_row) else thin
+        return Border(left=left, right=right, top=top, bottom=bottom)
 
     # Kopfzeile
     for col in range(1, ws.max_column + 1):
         cell = ws.cell(row=1, column=col)
         cell.fill   = _FILL_HEADER
         cell.font   = _FONT_HEADER
-        cell.border = border
+        cell.border = cell_border(col, 1)
         cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
 
     ws.row_dimensions[1].height = 22
@@ -71,7 +85,7 @@ def _apply_formatting(ws, df):
         for col in range(1, ws.max_column + 1):
             cell = ws.cell(row=row_idx, column=col)
             cell.font   = _FONT_BODY
-            cell.border = border
+            cell.border = cell_border(col, row_idx)
             cell.alignment = Alignment(vertical="center")
 
             # Zahlenformat
@@ -79,9 +93,11 @@ def _apply_formatting(ws, df):
                 cell.number_format = _NUM_FORMAT
                 cell.alignment = Alignment(horizontal="right", vertical="center")
 
-            # Farbe: Warnung nur auf SD-Spalte, sonst Zebrastreifen
+            # Farbe: Warnung > errechnete CZK-Spalten > Zebrastreifen
             if sd_warn and col == sd_col:
                 cell.fill = _FILL_WARN
+            elif col in calc_cols:
+                cell.fill = _FILL_CALC
             else:
                 cell.fill = base_fill
 
@@ -96,7 +112,9 @@ def _apply_formatting(ws, df):
 # ── CNB-Wechselkurse ─────────────────────────────────────────────────────
 # FAW_NR-Mapping: Schluessel in 3216/3226 -> ISO-Waehrungscode
 _FAW_MAP     = {1: "EUR", 22: "CZK", 23: "PLN", 24: "HUF"}
-_CONVERT_FAW = {1, 23}   # 1=EUR, 23=PLN werden umgerechnet; 22=CZK und 24=HUF bleiben
+_CONVERT_FAW = {1, 23}   # 1=EUR, 23=PLN werden umgerechnet
+_ALREADY_CZK = {22}      # 22=CZK: keine Umrechnung noetig, Betrag wird 1:1 uebernommen
+                         # (24=HUF bleibt unangetastet, keine Umrechnung)
 
 # Moegliche Spaltennamen fuer Fremdwaehrungsbetrag und Buchungstext
 _FW_COL_NAMES   = {"Fremdwährung", "Fremdwaehrung"}
@@ -178,24 +196,16 @@ def _apply_cnb_conversion(df: pd.DataFrame, source_file: str) -> list[str]:
     3216: Kein automatischer CNB-Kurs. Steht ein manueller Kurs im Text, wird damit umgerechnet.
     3226: CNB-Kurs per Rechnungsdatum. Steht bereits ein manueller Kurs im Text, wird dieser
           vorrangig verwendet (tritt auf wenn Rechnung nicht in Kreditoren.xlsx gefunden wurde).
-    In beiden Faellen: Unnamed: 8 wird auf CZK gesetzt, der Kurs wird NICHT nochmals angehaengt
-    wenn er bereits im Text steht.
+    Original Fremdwaehrung, deren Waehrungs-Spalte, Betrag und dessen Waehrungs-Spalte bleiben
+    unveraendert. Zusaetzlich werden direkt daneben "Betrag CZK" und "Waehrung CZK" eingefuegt.
+    Ist die Rechnung bereits in CZK (FAW_NR 22), wird der Betrag 1:1 uebernommen (keine Umrechnung
+    noetig). HUF (FAW_NR 24) bleibt wie bisher unangetastet.
+    Bei 3226 mit automatischem CNB-Kurs wird dieser zusaetzlich hinter die Warenart im Text
+    angehaengt (nicht wenn bereits ein manueller Kurs im Text stand).
     """
     fw_col   = next((c for c in df.columns if c in _FW_COL_NAMES),   None)
     text_col = next((c for c in df.columns if c in _TEXT_COL_NAMES), None)
     faw_col  = "FAW_NR" if "FAW_NR" in df.columns else None
-
-    # Waehrungsspalte dynamisch erkennen: Unnamed-Spalte deren Werte mehrheitlich
-    # Waehrungscodes sind (Spaltenname aendert sich durch df.insert vor Fix 4)
-    _known_currencies = {"EUR", "PLN", "CZK", "HUF", "USD", "GBP", "CHF"}
-    whr8_col = None
-    for col in df.columns:
-        if not col.startswith("Unnamed:"):
-            continue
-        vals = df[col].dropna().astype(str).str.strip().str.upper()
-        if not vals.empty and vals.isin(_known_currencies).mean() > 0.5:
-            whr8_col = col
-            break
 
     is_3216 = source_file == "3216.xlsx"
 
@@ -204,18 +214,30 @@ def _apply_cnb_conversion(df: pd.DataFrame, source_file: str) -> list[str]:
     if not fw_col:
         return [f"[{source_file}] Keine Fremdwaehrungs-Spalte gefunden – Umrechnung uebersprungen"]
 
+    # Neue Spalten hinter der Original-Waehrungsspalte einfuegen (nicht direkt hinter
+    # Fremdwaehrung), damit die Original-Waehrungseinheit neben dem Original-Betrag stehen bleibt.
+    _known_currencies = {"EUR", "PLN", "CZK", "HUF", "USD", "GBP", "CHF"}
+    fw_pos = df.columns.get_loc(fw_col)
+    insert_pos = fw_pos + 1
+    if fw_pos + 1 < len(df.columns):
+        next_col = df.columns[fw_pos + 1]
+        vals = df[next_col].dropna().astype(str).str.strip().str.upper()
+        if not vals.empty and vals.isin(_known_currencies).mean() > 0.5:
+            insert_pos = fw_pos + 2
+
+    df.insert(insert_pos, "Betrag CZK", None)
+    df.insert(insert_pos + 1, "Währung CZK", None)
+
     conv_warnings: list[str] = []
 
     for idx in df.index:
-        # FAW_NR -> Waehrungscode; nur EUR und PLN umrechnen
+        # FAW_NR -> Waehrungscode
         try:
             faw = int(float(str(df.at[idx, faw_col]).strip()))
         except (ValueError, TypeError):
             continue
-        if faw not in _CONVERT_FAW:
-            continue
-        currency  = _FAW_MAP[faw]
-        datum_str = str(df.at[idx, "Datum"]).strip()
+        if faw not in _CONVERT_FAW and faw not in _ALREADY_CZK:
+            continue  # z.B. HUF – bleibt unangetastet
 
         try:
             fw_val = float(df.at[idx, fw_col])
@@ -223,20 +245,29 @@ def _apply_cnb_conversion(df: pd.DataFrame, source_file: str) -> list[str]:
             conv_warnings.append(f"[{source_file}] Zeile {idx}: Kein gueltiger Betrag in {fw_col}")
             continue
 
+        if faw in _ALREADY_CZK:
+            # Bereits in CZK – keine Umrechnung noetig, 1:1 uebernehmen
+            df.at[idx, "Betrag CZK"]  = round(fw_val, 2)
+            df.at[idx, "Währung CZK"] = "CZK"
+            continue
+
+        currency  = _FAW_MAP[faw]
+        datum_str = str(df.at[idx, "Datum"]).strip()
+
         # Manuellen Kurs aus Text lesen (falls vorhanden)
         manual_rate = _extract_manual_rate(df.at[idx, text_col]) if text_col else None
+
+        append_rate = False  # Kurs hinter die Warenart im Text haengen (nur bei automatischem CNB-Kurs)
 
         if is_3216:
             # 3216: nur umrechnen wenn manueller Kurs im Text steht
             if manual_rate is None:
                 continue
             rate = manual_rate
-            append_rate = False      # Kurs steht schon im Text
         else:
             # 3226: manueller Kurs hat Vorrang, sonst CNB per Rechnungsdatum
             if manual_rate is not None:
                 rate = manual_rate
-                append_rate = False  # Kurs steht schon im Text
             else:
                 try:
                     rate, actual_date = _get_cnb_rate(datum_str, currency)
@@ -252,18 +283,15 @@ def _apply_cnb_conversion(df: pd.DataFrame, source_file: str) -> list[str]:
                     log(f"  [{source_file}] {datum_str} kein Handelstag – CNB-Kurs von {actual_date}")
                 append_rate = True
 
-        # Umrechnung
-        df.at[idx, fw_col] = round(fw_val * rate, 2)
+        # Umrechnung in neuer Spalte; Original-Fremdwaehrung/-Betrag bleibt unveraendert
+        df.at[idx, "Betrag CZK"]  = round(fw_val * rate, 2)
+        df.at[idx, "Währung CZK"] = "CZK"
 
-        # Kurs an Text anhaengen – nur wenn er noch nicht dort steht
+        # Bei automatischem CNB-Kurs (3226): Kurs wie bisher hinter die Warenart im Text anhaengen
         if append_rate and text_col:
             rate_str = f"{rate:.3f}".replace(".", ",")
             existing = str(df.at[idx, text_col]) if pd.notna(df.at[idx, text_col]) else ""
             df.at[idx, text_col] = existing.rstrip() + f" {rate_str}"
-
-        # Unnamed: 8 auf CZK setzen
-        if whr8_col:
-            df.at[idx, whr8_col] = "CZK"
 
     return conv_warnings
 

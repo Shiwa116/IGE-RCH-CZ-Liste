@@ -1,9 +1,9 @@
 Ordner: //vm-dc-fs/Benutzerdaten/fibu3/Desktop/Workspace GKAT Tools
 Lade Kreditoren.xlsx ...
-  [3216.xlsx] KEIN TREFFER: Ref=712601069 Kred=70022
-  [3216.xlsx] KEIN TREFFER: Ref=712601024 Kred=70022
-  [3216.xlsx] FUZZY (7071018670+7071017018+7081000513 -> 7071018670 + 7071017018 + 7081000513)
-3216.xlsx: 55 Zeilen verarbeitet
-3226.xlsx: 28 Zeilen verarbeitet
+3216.xlsx: 8 Zeilen verarbeitet
+  [3226.xlsx] FUZZY (0218/07/2026PART2 -> 0218/07/2026 PART 2)
+  [3226.xlsx] FUZZY (FVK0005/07/2026 -> FVK 0005/07/2026)
+  [3226.xlsx] FUZZY (FVS0228/07/2026 -> FVS 0228/07/2026)
+3226.xlsx: 5 Zeilen verarbeitet
 
 Gespeichert: //vm-dc-fs/Benutzerdaten/fibu3/Desktop/Workspace GKAT Tools\Reverse Charge and IGE.xlsx
