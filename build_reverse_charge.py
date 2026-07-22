@@ -12,6 +12,7 @@ from datetime import datetime, timedelta
 import pandas as pd
 import tkinter as tk
 from tkinter import filedialog, messagebox
+import openpyxl
 from openpyxl.styles import PatternFill, Font, Alignment, Border, Side
 from openpyxl.utils import get_column_letter
 
@@ -23,6 +24,7 @@ _FILL_ZEBRA_E = PatternFill("solid", fgColor="DCE6F1")   # hellblau (gerade Zeil
 _FILL_ZEBRA_O = PatternFill("solid", fgColor="FFFFFF")   # weiss (ungerade Zeilen)
 _FILL_WARN    = PatternFill("solid", fgColor="FFC7CE")   # rot – Service Date frueherer Monat
 _FILL_CALC    = PatternFill("solid", fgColor="FFF2CC")   # hellgold – errechnete CZK-Spalten
+_FILL_NEW     = PatternFill("solid", fgColor="FFC000")   # orange – neu ggue. Vorlauf oder dort schon markiert
 _BORDER_CALC_COLOR = "BF8F00"                            # dunkelgold – Rahmen um die CZK-Spalten
 _FONT_HEADER  = Font(bold=True, color="FFFFFF", name="Calibri", size=10)
 _FONT_BODY    = Font(name="Calibri", size=10)
@@ -31,8 +33,11 @@ _NUM_COLS     = {"Fremdwährung", "Fremdwaehrung", "Betrag", "Betrag CZK"}  # Sp
 _CALC_COLS    = {"Betrag CZK", "Währung CZK"}  # optisch abgesetzte, errechnete Spalten
 
 
-def _apply_formatting(ws, df):
-    """Zebrastreifen, Zahlenformat und Service-Date-Warnung auf ws anwenden."""
+def _apply_formatting(ws, df, highlight_rows: set = frozenset()):
+    """Zebrastreifen, Zahlenformat und Service-Date-Warnung auf ws anwenden.
+    highlight_rows (1-basierte Excel-Zeilennummern) werden komplett orange eingefaerbt
+    (neu ggue. der Vorlaufdatei oder dort schon orange) -- hat Vorrang vor SD-Warnung
+    und den goldenen CZK-Spalten."""
     headers = [c.value for c in ws[1]]
     col_idx = {name: i + 1 for i, name in enumerate(headers) if name}
 
@@ -93,8 +98,10 @@ def _apply_formatting(ws, df):
                 cell.number_format = _NUM_FORMAT
                 cell.alignment = Alignment(horizontal="right", vertical="center")
 
-            # Farbe: Warnung > errechnete CZK-Spalten > Zebrastreifen
-            if sd_warn and col == sd_col:
+            # Farbe: Orange (neu/uebernommen) > Warnung > errechnete CZK-Spalten > Zebrastreifen
+            if row_idx in highlight_rows:
+                cell.fill = _FILL_NEW
+            elif sd_warn and col == sd_col:
                 cell.fill = _FILL_WARN
             elif col in calc_cols:
                 cell.fill = _FILL_CALC
@@ -302,6 +309,85 @@ _log = []
 
 REQUIRED_COLS = {"Referenz", "Gegenkto", "Datum"}
 
+OUTPUT_NAME = "Reverse Charge and IGE.xlsx"
+OLD_OUTPUT_NAME = "Reverse Charge and IGE old.xlsx"
+
+
+# ── Abgleich gegen den vorherigen Lauf ──────────────────────────────────────
+def _norm_ref(v) -> str:
+    """Referenz normalisiert: trailing '.0' und fuehrende Nullen entfernen."""
+    s = str(v).strip()
+    if s.endswith(".0"):
+        s = s[:-2]
+    stripped = s.lstrip("0")
+    return stripped if stripped else s
+
+
+def _norm_gk(v) -> str:
+    """Gegenkto normalisiert: trailing '.0' entfernen (wie Company Account anderswo)."""
+    s = str(v).strip()
+    if s.endswith(".0"):
+        s = s[:-2]
+    return s
+
+
+def rotate_previous_output(folder: str) -> str | None:
+    """Benennt eine vorhandene OUTPUT_NAME-Datei zu OLD_OUTPUT_NAME um (eine vorher
+    bestehende OLD_OUTPUT_NAME wird geloescht). Gibt den old_path zurueck, wenn eine
+    Vorlauf-Datei zum Abgleich existiert, sonst None (z.B. beim allerersten Lauf)."""
+    output_path = os.path.join(folder, OUTPUT_NAME)
+    old_path = os.path.join(folder, OLD_OUTPUT_NAME)
+    if not os.path.exists(output_path):
+        return None
+    if os.path.exists(old_path):
+        os.remove(old_path)
+    os.rename(output_path, old_path)
+    return old_path
+
+
+def _load_old_keys(old_path: str | None, sheet_name: str) -> tuple[set, set]:
+    """Liest die Vorlauf-Datei (falls vorhanden) und gibt (alle_keys, orange_keys)
+    fuer das gegebene Sheet zurueck. Kein old_path oder Sheet/Spalten fehlen -> (leer, leer)."""
+    if not old_path:
+        return set(), set()
+    wb = openpyxl.load_workbook(old_path, data_only=True)
+    if sheet_name not in wb.sheetnames:
+        return set(), set()
+    ws = wb[sheet_name]
+    headers = [c.value for c in ws[1]]
+    if "Referenz" not in headers or "Gegenkto" not in headers:
+        return set(), set()
+    ref_i = headers.index("Referenz") + 1
+    gk_i = headers.index("Gegenkto") + 1
+    keys, orange_keys = set(), set()
+    for r in range(2, ws.max_row + 1):
+        ref, gk = ws.cell(r, ref_i).value, ws.cell(r, gk_i).value
+        if ref is None and gk is None:
+            continue
+        key = (_norm_ref(ref), _norm_gk(gk))
+        keys.add(key)
+        fg = ws.cell(r, 1).fill.fgColor.rgb
+        if isinstance(fg, str) and fg.upper().endswith("FFC000"):
+            orange_keys.add(key)
+    return keys, orange_keys
+
+
+def _compute_highlight_rows(new_keys: list, old_keys: set, old_orange_keys: set) -> tuple[set, str | None]:
+    """Excel-Zeilennummern (1-basiert, ab 2) die orange markiert werden sollen, plus
+    optionaler Log-Hinweis wenn die Markierung uebersprungen wurde.
+    Kein Vergleichsmassstab (old_keys leer, z.B. allererster Lauf) oder keine einzige
+    Ueberschneidung zwischen alt und neu (z.B. Monatswechsel, alte Datei nicht rechtzeitig
+    umbenannt) -> keine Markierung statt faelschlich 'alles ist neu'."""
+    if not old_keys:
+        return set(), "kein Vergleichslauf vorhanden"
+    if not (old_keys & set(new_keys)):
+        return set(), "keine Uebereinstimmung mit altem Lauf gefunden (vermutlich neuer Monat)"
+    highlight_rows = set()
+    for pos, key in enumerate(new_keys):
+        if key not in old_keys or key in old_orange_keys:
+            highlight_rows.add(pos + 2)  # Excel-Zeile: Header=1, erste Datenzeile=2
+    return highlight_rows, None
+
 
 def log(msg):
     _log.append(msg)
@@ -359,6 +445,19 @@ def main():
             messagebox.showerror("Fehler", f"{fname} nicht im Ordner gefunden.")
             return
 
+    # Vorherigen Lauf archivieren (-> ...old.xlsx), bevor die neue Datei entsteht;
+    # old_path (falls vorhanden) dient anschliessend als Vergleichsbasis fuer die
+    # Orange-Markierung neuer/uebernommener Zeilen.
+    try:
+        old_path = rotate_previous_output(folder)
+    except PermissionError:
+        messagebox.showerror(
+            "Datei gesperrt",
+            f"'{OUTPUT_NAME}' oder '{OLD_OUTPUT_NAME}' konnte nicht umbenannt werden.\n\n"
+            f"Bitte zuerst in Excel schliessen."
+        )
+        return
+
     # Fix 5: Kreditoren laden — Fallback auf Datei-Dialog wenn Netzwerkpfad nicht erreichbar
     kred_path = KREDITOREN_PATH
     if not os.path.exists(kred_path):
@@ -382,6 +481,7 @@ def main():
     kred["Company Account"] = kred["Company Account"].astype(str).str.strip().str.replace(".0", "", regex=False)
 
     sheets = {}
+    highlight_map = {}
     warnings = []
 
     for source_file, sheet_name in [("3216.xlsx", "Reverse Charge - 3216"), ("3226.xlsx", "IGE - 3226")]:
@@ -426,19 +526,22 @@ def main():
                 cols[i] = f"Unnamed: {i}"
         df.columns = cols
 
+        # Abgleich gegen den vorherigen Lauf: neue Zeilen (nicht in old_path) sowie dort
+        # bereits orange markierte Zeilen werden auch hier orange markiert. Kein alter Lauf
+        # oder 0 Ueberschneidungen (z.B. Monatswechsel) -> keine Markierung, siehe
+        # _compute_highlight_rows.
+        old_keys, old_orange_keys = _load_old_keys(old_path, sheet_name)
+        new_keys = [(_norm_ref(df.at[idx, "Referenz"]), _norm_gk(df.at[idx, "Gegenkto"])) for idx in df.index]
+        highlight_rows, skip_reason = _compute_highlight_rows(new_keys, old_keys, old_orange_keys)
+        highlight_map[sheet_name] = highlight_rows
+
         sheets[sheet_name] = df
-        log(f"{source_file}: {len(df)} Zeilen verarbeitet")
+        if skip_reason:
+            log(f"  [{source_file}] {skip_reason} -- Markierung uebersprungen")
+        log(f"{source_file}: {len(df)} Zeilen verarbeitet, {len(highlight_rows)} orange markiert"
+            f" (neu oder aus altem Lauf uebernommen)")
 
-    output_path = os.path.join(folder, "Reverse Charge and IGE.xlsx")
-
-    # Fix 7: Ueberschreib-Schutz
-    if os.path.exists(output_path):
-        if not messagebox.askyesno(
-            "Datei ueberschreiben?",
-            f"Die Datei existiert bereits:\n{output_path}\n\nUeberschreiben?"
-        ):
-            log("Abbruch durch Benutzer (kein Ueberschreiben).")
-            return
+    output_path = os.path.join(folder, OUTPUT_NAME)
 
     # Fix 3: PermissionError abfangen (z.B. Datei noch in Excel geoeffnet)
     try:
@@ -447,7 +550,7 @@ def main():
                 df.to_excel(writer, sheet_name=sheet_name, index=False)
             # Formatierung nach dem Schreiben aller Blaetter anwenden
             for sheet_name, df in sheets.items():
-                _apply_formatting(writer.sheets[sheet_name], df)
+                _apply_formatting(writer.sheets[sheet_name], df, highlight_map.get(sheet_name, set()))
     except PermissionError:
         messagebox.showerror(
             "Datei gesperrt",
